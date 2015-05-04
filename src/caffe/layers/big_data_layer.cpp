@@ -23,15 +23,15 @@ namespace caffe {
 template <typename Dtype>
 BigDataLayer<Dtype>::~BigDataLayer<Dtype>() {
   this->JoinPrefetchThread();
-  if (istream_ != NULL) delete istream_;
+  if (textstream_ != NULL) delete textstream_;
 }
 
 template <typename Dtype>
-void BigDataLayer<Dtype>::ResetStream(std::istream* newstream) {
+void BigDataLayer<Dtype>::ResetStream(std::fstream* newstream) {
   this->JoinPrefetchThread();
   LOG(WARNING) << "BigData stream reset called";
-  if(istream_ != NULL) delete istream_;
-  istream_ = newstream;
+  if(textstream_ != NULL) delete textstream_;
+  textstream_ = newstream;
   this->CreatePrefetchThread();
 }
 
@@ -40,25 +40,38 @@ void BigDataLayer<Dtype>::DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
       const vector<Blob<Dtype>*>& top) {
   CPUTimer init_timer;
   init_timer.Start();
-  // setup everything with reading from file
-  istream_ = new std::ifstream(this->layer_param_.big_data_param().source().c_str());
-  istream_->seekg(0, std::ios::end);
-  file_smaller_than_chunk_ =
-    (this->layer_param_.big_data_param().chunk_size() * 1000000) > (istream_->tellg()/4);
-  // why /4 you ask? We suppose file contains floats right? (<sep><num><.><num>)
-  already_loaded_ = false;
-  if (file_smaller_than_chunk_) {
-    LOG(INFO) << "BigData loaded file is LESS than one chunk";
-  } else {
-    LOG(INFO) << "BigData loaded file is MORE than one chunk";
-  }
-  istream_->seekg(0);
-  delim_ = this->layer_param_.big_data_param().separator().c_str()[0];
-  newline_ = this->layer_param_.big_data_param().newline().c_str()[0];
+  // first check if we have already a binary-csv
+  binstream_ = new std::fstream(string(this->layer_param_.big_data_param().source() + "bin").c_str(),
+    std::ios::in | std::ios::binary);
+  bin_writing_ = false; // because you can't get the mode of opening of a stream
+  LOG(INFO) << "Binstream opened with flag" << binstream_->rdstate();
 
-  // skip header if exists
-  if(this->layer_param_.big_data_param().has_header()) {
-    istream_->ignore(2147483647, newline_);
+  if(!binstream_->good()) {
+    LOG(INFO) << "There is no BIN file yet, using CSV file";
+    delete binstream_;
+    binstream_ = new std::fstream(string(this->layer_param_.big_data_param().source() + "bin").c_str(),
+      std::ios::out | std::ios::binary);
+    bin_writing_ = true;
+    textstream_ = new std::fstream(this->layer_param_.big_data_param().source().c_str(),
+      std::ios::in);
+    textstream_->seekg(0);
+    file_smaller_than_chunk_ =
+      (this->layer_param_.big_data_param().chunk_size() * 1000000) > (textstream_->tellg()/4);
+    // why /4 you ask? We suppose file contains floats right? (<sep><num><.><num>)
+    already_loaded_ = false;
+    if (file_smaller_than_chunk_) {
+      LOG(INFO) << "BigData loaded file is LESS than one chunk";
+    } else {
+      LOG(INFO) << "BigData loaded file is MORE than one chunk";
+    }
+    textstream_->seekg(0);
+    delim_ = this->layer_param_.big_data_param().separator().c_str()[0];
+    newline_ = this->layer_param_.big_data_param().newline().c_str()[0];
+
+    // skip header if exists
+    if(this->layer_param_.big_data_param().has_header()) {
+      textstream_->ignore(2147483647, newline_);
+    }
   }
 
   // save indices describing data
@@ -109,18 +122,22 @@ void BigDataLayer<Dtype>::InternalThreadEntry() {
   // batch_timer.Start();
   // double read_time = 0;
   // double trans_time = 0;
-  std::ifstream *istream = dynamic_cast<std::ifstream*>(istream_);
-  std::istringstream linestream;
-  std::string line;
+  // std::ifstream *istream = dynamic_cast<std::ifstream*>(textstream_);
+  // std::istringstream linestream;
+  // std::string line;
   char buff[255];
 
-  // LOG(INFO) << "BigData: thread #" << boost::this_thread::get_id() << " STARTS on file pos: " << istream->tellg();
+  if(bin_writing_) {
+    LOG(INFO) << "BigData: thread #" << boost::this_thread::get_id() << " STARTS on file pos: " << textstream_->tellg();
+  } else {
+    LOG(INFO) << "BigData: thread #" << boost::this_thread::get_id() << " STARTS on file pos: " << binstream_->tellg();
+  }
 
   // if we have read the whole file and it's smaller than chunk, don't read it again
   if(file_smaller_than_chunk_ && already_loaded_)
   {
     batch_timer.Stop();
-    // LOG(INFO) << "File smaller than batch -- using last loaded data";
+    LOG(INFO) << "File smaller than batch -- using last loaded data";
     return;
   }
 
@@ -146,38 +163,68 @@ void BigDataLayer<Dtype>::InternalThreadEntry() {
   {
     current_col = 0;
     data_col = 0;
-    std::getline(*istream, line);
-    linestream.str(line);
-    linestream.clear(); // clear any bad flags
+    // std::getline(*istream, line);
+    // linestream.str(line);
+    // linestream.clear(); // clear any bad flags
+    if(!bin_writing_) { // if we read from binary stream
+      if(has_label_) {
+        *binstream_ >> *cur_label;
+      }
+      binstream_->read((char*)cur_data, data_total * sizeof(*cur_data));
+      // for(int i=0; i<data_total; ++i)
+      //   binstream_ >> cur_data[i]
+      if(binstream_->eof()) {
+        binstream_->close();
+        delete binstream_;
+        binstream_ = new std::fstream(string(this->layer_param_.big_data_param().source() + "bin").c_str(),
+          std::ios::in | std::ios::binary);
+      }
+      data_col = data_total;
+    } else { // else = we are still writing binary data
+      // read a row from text file
+      while(textstream_->good() && (has_label_ != got_label || data_col < data_total))
+      {
+        // linestream.getline(buff, 255, delim_);
+        textstream_->getline(buff, 255, delim_);
+        if(current_col >= data_start_ && current_col <= data_end_) {
+          cur_data[data_col] = atof(buff);
+          ++data_col;
+        }
 
-    while(linestream.good() && (has_label_ != got_label || data_col < data_total))
-    {
-      linestream.getline(buff, 255, delim_);
+        if(current_col == label_) {
+          *cur_label = atof(buff);
+          got_label = true;
+        }
 
-      if(current_col >= data_start_ && current_col <= data_end_) {
-        cur_data[data_col] = atof(buff);
-        ++data_col;
+        ++current_col;
+      }
+      textstream_->ignore(2147483647, newline_);
+
+      // save the row to the binary file
+      if (data_col == data_total) {
+        if(has_label_) *binstream_ << *cur_label;
+        binstream_->write((char*) cur_data, data_total * sizeof(*cur_data));
+        // for(int i=0; i<data_total; ++i)
+        //   binstream_ << cur_data[i];
       }
 
-      if(current_col == label_) {
-        *cur_label = atof(buff);
-        got_label = true;
-      }
-
-      ++current_col;
-    }
-
-    // rewinding file clears eof flag
-    if(istream->eof()) {
-      // why can't we just seekg(0)?! For some reason it doesnt' rewind the file :-/
-      // LOG(INFO) << "BigData reset file at batch " << current_batch;
-      istream->close();
-      delete istream_;
-      istream = new std::ifstream(this->layer_param_.big_data_param().source().c_str());
-      istream_ = istream;
-      if (data_col < data_total) {
+      // if we reached EOF || there was an empty line at the end of the file
+      if(textstream_->eof() || data_col < data_total) {
+        // why can't we just seekg(0)?! For some reason it doesnt' rewind the file :-/
+        LOG(INFO) << "BigData reset file at batch " << current_batch;
+        textstream_->close();
+        delete textstream_;
+        textstream_ = NULL;
+        // reuse the binary file
+        if (binstream_->is_open()) {
+          binstream_->close();
+          delete binstream_;
+        }
+        binstream_ = new std::fstream(string(this->layer_param_.big_data_param().source() + "bin").c_str(),
+          std::ios::in | std::ios::binary);
+        bin_writing_ = false;
         // means there was an empty line at the end of the file, so restart loading
-        continue;
+        if (data_col < data_total) continue;
       }
     }
 
@@ -185,20 +232,19 @@ void BigDataLayer<Dtype>::InternalThreadEntry() {
     cur_data += data_col;
 
     ++current_batch;
-    // LOG(INFO) << "BigData read " << current_batch << "/" << shape_[0]
-    //   << "; sneak peak of data: " << cur_data[-data_col] << "..." << cur_data[-1]
-    //   << " label: " << cur_label[-1]; // TODO: dangerous, remove
 
-    // istream->ignore(2147483647, newline_);
+    LOG(INFO) << boost::this_thread::get_id() << " " << current_batch << "/" << shape_[0]
+      << " CSV? " << bin_writing_ << "; D: " << cur_data[-data_col] << "..." << cur_data[-1]
+      << " L: " << cur_label[-1]; // TODO: dangerous, remove
 
-    if(boost::this_thread::interruption_requested()) {
-      LOG(INFO) << "BigData got interrupt request at " << current_batch;
-      // don't return smaller data than 1/10th of the optimal batch size
-      // or don't quit if the whole file is smaller than one chunk
-      if(current_batch < int(shape_[0]/10) || file_smaller_than_chunk_) continue;
-      // otherwise break out
-      break;
-    }
+    // if(boost::this_thread::interruption_requested()) {
+    //   LOG(INFO) << "BigData got interrupt request at " << current_batch;
+    //   // don't return smaller data than 1/10th of the optimal batch size
+    //   // or don't quit if the whole file is smaller than one chunk
+    //   if(current_batch < int(shape_[0]/10) || file_smaller_than_chunk_) continue;
+    //   // otherwise break out
+    //   break;
+    // }
   }
 
   if(current_batch < shape_[0]) {

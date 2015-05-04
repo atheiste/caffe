@@ -117,15 +117,16 @@ class BigDataLayer : public BasePrefetchingDataLayer<Dtype> {
   virtual inline int MinTopBlobs() const { return 1; }
   virtual inline int MaxTopBlobs() const { return 2; }
 
-  void ResetStream(std::istream* newstream);
+  void ResetStream(std::fstream* newstream);
 
  protected:
   virtual void InternalThreadEntry();
   vector<int> label_shape_;
   vector<int> shape_;
-  std::istream* istream_ = NULL;
+  std::fstream *textstream_ = NULL, *binstream_ = NULL;
+
   size_t data_start_, data_end_, label_;
-  bool has_label_, file_smaller_than_chunk_, already_loaded_;
+  bool has_label_, file_smaller_than_chunk_, already_loaded_, bin_writing_;
   char newline_, delim_;
 };
 
