@@ -121,6 +121,9 @@ class BigDataLayer : public BasePrefetchingDataLayer<Dtype> {
 
  protected:
   virtual void InternalThreadEntry();
+  void ReadFromBin(size_t how_many, Dtype* data, Dtype* labels);
+  void ReadFromText(size_t how_many, Dtype* data, Dtype* labels);
+
   vector<int> label_shape_;
   vector<int> shape_;
   std::fstream *textstream_ = NULL, *binstream_ = NULL;
