@@ -24,7 +24,14 @@ namespace caffe {
 template <typename Dtype>
 BigDataLayer<Dtype>::~BigDataLayer<Dtype>() {
   this->JoinPrefetchThread();
-  if (textstream_ != NULL) delete textstream_;
+  if (textstream_ != NULL) {
+    if(textstream_->is_open()) textstream_->close();
+    delete textstream_;
+  }
+  if (binstream_ != NULL) {
+    if(binstream_->is_open()) binstream_->close();
+    delete binstream_;
+  }
 }
 
 template <typename Dtype>
@@ -41,38 +48,49 @@ void BigDataLayer<Dtype>::DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
       const vector<Blob<Dtype>*>& top) {
   CPUTimer init_timer;
   init_timer.Start();
+  file_smaller_than_chunk_ = false;
+  already_loaded_ = false;
   // first check if we have already a binary-csv
   binstream_ = new std::fstream(string(this->layer_param_.big_data_param().source() + "bin").c_str(),
     std::ios::in | std::ios::binary);
-  bin_writing_ = false; // because you can't get the mode of opening of a stream
-  LOG(INFO) << "Binstream opened with flag" << binstream_->rdstate();
+  has_binary_ = binstream_->good();
 
-  if(!binstream_->good()) {
-    LOG(INFO) << "There is no BIN file yet, using CSV file";
-    delete binstream_;
-    binstream_ = new std::fstream(string(this->layer_param_.big_data_param().source() + "bin.part").c_str(),
-      std::ios::out | std::ios::binary);
-    bin_writing_ = true;
+  if(binstream_->good())
+  {
+    // find out if the data will fit in one batch (so we can cache them)
+    binstream_->seekg(0, std::ios_base::end);
+    file_smaller_than_chunk_ =
+      (this->layer_param_.big_data_param().chunk_size() * 1000000) > (binstream_->tellg());
+    binstream_->seekg(0);
+    LOG(INFO) << "Using converted BINARY CSV file instead the original one!";
+  }
+  else
+  {
     textstream_ = new std::fstream(this->layer_param_.big_data_param().source().c_str(),
       std::ios::in);
-    textstream_->seekg(0);
+    // find out if the data will fit in one batch (so we can cache them)
+    textstream_->seekg(0, std::ios_base::end);
     file_smaller_than_chunk_ =
-      (this->layer_param_.big_data_param().chunk_size() * 1000000) > (textstream_->tellg()/4);
-    // why /4 you ask? We suppose file contains floats right? (<sep><num><.><num>)
-    already_loaded_ = false;
-    if (file_smaller_than_chunk_) {
-      LOG(INFO) << "BigData loaded file is LESS than one chunk";
-    } else {
-      LOG(INFO) << "BigData loaded file is MORE than one chunk";
-    }
+      (this->layer_param_.big_data_param().chunk_size() * 1000000) > (textstream_->tellg()/2);
     textstream_->seekg(0);
+
     delim_ = this->layer_param_.big_data_param().separator().c_str()[0];
     newline_ = this->layer_param_.big_data_param().newline().c_str()[0];
 
-    // skip header if exists
-    if(this->layer_param_.big_data_param().has_header()) {
+    // skip # of lines denoted to header
+    for(int i=0; i < this->layer_param_.big_data_param().header(); ++i) {
       textstream_->ignore(2147483647, newline_);
     }
+
+    // init binary stream for writing
+    delete binstream_;
+    binstream_ = new std::fstream(string(this->layer_param_.big_data_param().source() + "bin.part").c_str(),
+      std::ios::out | std::ios::binary);
+
+  }
+
+  if (file_smaller_than_chunk_) {
+    LOG(INFO) << "Source file is LESS than one chunk - will use memory caching";
   }
 
   // save indices describing data
@@ -123,7 +141,7 @@ void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* labe
   size_t batch = 0, current_col = 0, data_col = 0;
   bool got_label = false;
 
-  LOG(INFO) << " TEXT, STARTS on pos: " << textstream_->tellg();
+  // LOG(INFO) << " TEXT, STARTS on pos: " << textstream_->tellg();
 
   while(batch < how_many)
   {
@@ -151,10 +169,8 @@ void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* labe
 
     if (data_col == data_total) {
       // save the row to the binary file
-      if(has_label_) *binstream_ << *labels;
-      // binstream_->write((char*) data, data_total * sizeof(*data));
-      for(int i=0; i<data_total; ++i) *binstream_ << data[i];
-
+      if(has_label_) binstream_->write((char*)labels, sizeof(*labels));
+      binstream_->write((char*) data, data_total * sizeof(*data));
       // move the pointers
       ++batch;
       data += data_total;
@@ -163,26 +179,25 @@ void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* labe
 
     // if we reached EOF || there was an empty line at the end of the file
     if(textstream_->eof() || data_col < data_total) {
-      // why can't we just seekg(0)?! For some reason it doesnt' rewind the file :-/
-      LOG(INFO) << "reset file at batch " << batch;
+      // LOG(INFO) << "Reset file at batch " << batch;
       binstream_->close();
       textstream_->close();
       delete textstream_;
-      delete binstream_;
       textstream_ = NULL;
       std::rename( // strip the ".part" extension when the file is done
         string(this->layer_param_.big_data_param().source() + "bin.part").c_str(),
         string(this->layer_param_.big_data_param().source() + "bin").c_str());
       // reuse the binary file
+      delete binstream_;
       binstream_ = new std::fstream(string(this->layer_param_.big_data_param().source() + "bin").c_str(),
         std::ios::in | std::ios::binary);
-      bin_writing_ = false;
+      has_binary_ = true;
       // means there was an empty line at the end of the file, so restart loading
       return ReadFromBin(how_many - batch, data, labels);
     }
-    LOG(INFO) << " CSV " << batch << "/" << how_many
-      << " D: " << data[-data_total] << "..." << data[-1]
-      << " L: " << labels[-1]; // TODO: dangerous, remove
+    // LOG(INFO) << " CSV " << batch << "/" << how_many
+    //   << " D: " << data[-data_total] << "..." << data[-1]
+    //   << " L: " << labels[-1]; // TODO: dangerous, remove
   }
 }
 
@@ -190,27 +205,29 @@ void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* labe
 template <typename Dtype>
 void BigDataLayer<Dtype>::ReadFromBin(size_t how_many, Dtype* data, Dtype* labels)
 {
-  LOG(INFO) << " BIN,  STARTS on pos: " << binstream_->tellg();
+  // LOG(INFO) << " BIN,  STARTS on pos: " << binstream_->tellg();
   size_t data_total = (shape_[1] * shape_[2] * shape_[3]);
 
   for(int batch=0; batch < how_many; ++batch)
   {
     if(has_label_) {
-      *binstream_ >> *labels;
+      binstream_->read((char*)labels, sizeof(*labels));
       labels += 1;
     }
-    // binstream_->read((char*)data, data_total * sizeof(*data));
-    for(int i=0; i<data_total; ++i) *binstream_ >> data[i];
+    binstream_->read((char*)data, data_total * sizeof(*data));
     data += data_total;
     if(binstream_->eof()) {
+      // this flags get set in case of unsucessful read -- means that we should
+      // check it always after the first read and then re-read ... here we leave
+      // one old datum in the prefetched_data ... which doesn't hurt, does it?
       binstream_->close();
       delete binstream_;
       binstream_ = new std::fstream(string(this->layer_param_.big_data_param().source() + "bin").c_str(),
         std::ios::in | std::ios::binary);
     }
-    LOG(INFO) << " BIN " << batch << "/" << how_many
-    << " D: " << data[-data_total] << "..." << data[-1]
-    << " L: " << labels[-1]; // TODO: dangerous, remove
+    // LOG(INFO) << " BIN " << batch << "/" << how_many
+    // << " D: " << data[-data_total] << "..." << data[-1]
+    // << " L: " << labels[-1]; // TODO: dangerous, remove
   }
 }
 
@@ -224,7 +241,7 @@ void BigDataLayer<Dtype>::InternalThreadEntry() {
   // if we have read the whole file and it's smaller than chunk, don't read it again
   if(file_smaller_than_chunk_ && already_loaded_) {
     batch_timer.Stop();
-    LOG(INFO) << "File smaller than batch -- using last loaded data";
+    // LOG(INFO) << "File smaller than batch -- using last loaded data";
     return;
   }
 
@@ -239,10 +256,10 @@ void BigDataLayer<Dtype>::InternalThreadEntry() {
     top_label = this->prefetch_label_.mutable_cpu_data();
   }
 
-  if(bin_writing_)
-    ReadFromText(shape_[0], top_data, top_label);
-  else
+  if(has_binary_)
     ReadFromBin(shape_[0], top_data, top_label);
+  else
+    ReadFromText(shape_[0], top_data, top_label);
 
   already_loaded_ = true;
   // LOG(INFO) << "BigData: thread #" << " ENDS on file pos: " << istream->tellg();

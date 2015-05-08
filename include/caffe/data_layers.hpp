@@ -129,7 +129,7 @@ class BigDataLayer : public BasePrefetchingDataLayer<Dtype> {
   std::fstream *textstream_ = NULL, *binstream_ = NULL;
 
   size_t data_start_, data_end_, label_;
-  bool has_label_, file_smaller_than_chunk_, already_loaded_, bin_writing_;
+  bool has_label_, file_smaller_than_chunk_, already_loaded_, has_binary_;
   char newline_, delim_;
 };
 

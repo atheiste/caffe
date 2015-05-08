@@ -475,7 +475,7 @@ message BigDataParameter {
   // much GPU memory is used.
   optional float chunk_size = 5 [default = 20];
   // We expect the data to be given in CSV-like format so we need a separator and newline
-  optional bool has_header = 6 [default = true];
+  optional uint32 header = 6 [default = 1];
   optional string separator = 7 [default = ","];
   optional string newline = 8 [default = "\n"];
   // Specify the dimensions of input data. If there is no specification then we
