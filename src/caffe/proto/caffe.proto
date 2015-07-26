@@ -489,6 +489,15 @@ message BigDataParameter {
   // Specifies the maximal usage of RAM on the host. The chunk_size attribute
   // controls memory used on GPU.
   optional uint32 memory_limit = 11 [default = 300];
+  // Controls cache usage. Useful on systems when you can not create files in
+  // the data location or the source file is always changing. Otherwise the
+  // binary cache speeds up reading of CSV up to the speed of the others data layers
+  enum CacheControl {
+    ENABLED = 0;
+    RENEW = 1;
+    DISABLED = 2;
+  }
+  optional CacheControl cache = 12 [default = ENABLED];
 }
 
 // Message that stores parameters used by DropoutLayer
