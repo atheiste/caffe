@@ -73,7 +73,7 @@ void BigDataLayer<Dtype>::DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
   data_start_ = big_params.data_start();
   data_end_ = big_params.data_end();
   label_ = big_params.label();
-  size_t data_cols = data_end_ - data_start_ + (has_label_ ? 1 : 0);
+  size_t data_cols = data_end_ - data_start_ + 1 + (has_label_ ? 1 : 0);
 
   // first check if we have already a binary-csv
   switch (big_params.cache())
@@ -120,7 +120,7 @@ void BigDataLayer<Dtype>::DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
     int count = 0;
     char* p = buff;
     while(*(p++) != '\0') if(*p == delim_) ++count;
-    if(count <= data_cols) {
+    if(count < (data_cols-1)) {
       LOG(ERROR) << "Found only " << count << " delimiters '" << delim_ 
                  << "' in line " << buff << std::endl;
       throw std::ifstream::failure("Not enough data columns in source file?");
@@ -354,7 +354,6 @@ void BigDataLayer<Dtype>::Forward_cpu(
     const vector<Blob<Dtype>*>& bottom, const vector<Blob<Dtype>*>& top) {
   // First, join the thread
   this->JoinPrefetchThread();
-  std::cout << "Asking for data" << std::endl;
   DLOG(INFO) << "Thread joined";
   // Reshape to loaded data.
   top[0]->Reshape(this->prefetch_data_.num(), this->prefetch_data_.channels(),
