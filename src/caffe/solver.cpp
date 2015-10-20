@@ -370,6 +370,7 @@ void Solver<Dtype>::Test(const int test_net_id) {
     }
     if (i == 0) {
       for (int j = 0; j < result.size(); ++j) {
+        if(result[j]->count() > 3) continue;
         const Dtype* result_vec = result[j]->cpu_data();
         for (int k = 0; k < result[j]->count(); ++k) {
           test_score.push_back(result_vec[k]);
@@ -379,6 +380,7 @@ void Solver<Dtype>::Test(const int test_net_id) {
     } else {
       int idx = 0;
       for (int j = 0; j < result.size(); ++j) {
+        if(result[j]->count() > 3) continue;
         const Dtype* result_vec = result[j]->cpu_data();
         for (int k = 0; k < result[j]->count(); ++k) {
           test_score[idx++] += result_vec[k];

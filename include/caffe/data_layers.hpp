@@ -120,30 +120,24 @@ class BigDataLayer : public BasePrefetchingDataLayer<Dtype> {
   virtual ~BigDataLayer();
   virtual void DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
       const vector<Blob<Dtype>*>& top);
-
+  // DataLayer uses DataReader instead for sharing for parallelism
+  virtual inline bool ShareInParallel() const { return false; }
   virtual inline const char* type() const { return "BigData"; }
   virtual inline int ExactNumBottomBlobs() const { return 0; }
   virtual inline int MinTopBlobs() const { return 1; }
   virtual inline int MaxTopBlobs() const { return 3; }
 
-  void ResetStream(std::fstream* newstream);
-
  protected:
-  virtual void Forward_cpu(const vector<Blob<Dtype>*>& bottom,
-      const vector<Blob<Dtype>*>& top);
-  virtual void InternalThreadEntry();
+  virtual void load_batch(Batch<Dtype>* batch);
   void ReadFromBin(size_t how_many, Dtype* data, Dtype* labels, Dtype* ids);
   void ReadFromText(size_t how_many, Dtype* data, Dtype* labels, Dtype* ids);
 
   Blob<Dtype> prefetch_ids_;
-  vector<int> label_shape_;
-  vector<int> shape_;
+  vector<int> shape_, label_shape_;
   std::fstream *textstream_, *binstream_;
 
   size_t data_start_, data_end_, label_, cur_id_;
-  bool has_label_, has_ids_;
-  bool file_smaller_than_chunk_, already_loaded_, has_binary_, cache_;
-  char newline_, delim_;
+  bool has_label_, has_ids_, has_binary_, cache_;
 };
 
 /**
