@@ -127,17 +127,23 @@ class BigDataLayer : public BasePrefetchingDataLayer<Dtype> {
   virtual inline int MinTopBlobs() const { return 1; }
   virtual inline int MaxTopBlobs() const { return 3; }
 
+  virtual void Forward_cpu(const vector<Blob<Dtype>*>& bottom,
+      const vector<Blob<Dtype>*>& top);
+
+  static const int PREFETCH_COUNT = 1;
+
  protected:
   virtual void load_batch(Batch<Dtype>* batch);
   void ReadFromBin(size_t how_many, Dtype* data, Dtype* labels, Dtype* ids);
   void ReadFromText(size_t how_many, Dtype* data, Dtype* labels, Dtype* ids);
 
-  Blob<Dtype> prefetch_ids_;
   vector<int> shape_, label_shape_;
   std::fstream *textstream_, *binstream_;
 
-  size_t data_start_, data_end_, label_, cur_id_;
-  bool has_label_, has_ids_, has_binary_, cache_;
+  size_t data_start_, data_end_, label_;  // indices denoting data resp. label
+  size_t index_;  // keeps track of the current index of row being read from source
+  bool output_meta_; // if we output indices of rows as well
+  bool has_binary_, cache_; // has_binary_ if we already created a binary file, cache if caching is allowed
 };
 
 /**

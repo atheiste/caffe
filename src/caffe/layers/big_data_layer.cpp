@@ -45,22 +45,20 @@ void BigDataLayer<Dtype>::DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
   CPUTimer init_timer;
   init_timer.Start();
   const BigDataParameter& big_params = this->layer_param_.big_data_param();
-  cur_id_ = 0;
-
+  index_ = 0;
   // check the right count of blobs
-  this->output_labels_ = top.size() > 1;
-  has_label_ = (big_params.has_label() && big_params.label() != -1);
-  has_ids_ = ((!has_label_ && top.size() == 2) || (top.size() == 3));
+  this->output_labels_ = (big_params.has_label() && big_params.label() != -1);
+  this->output_meta_ = ((!this->output_labels_ && top.size() == 2) || (top.size() == 3));
 
   // save metainfo about textual parameters
-  delim = big_params.separator().c_str()[0];
-  newline = big_params.newline().c_str()[0];
+  char delim = big_params.separator().c_str()[0];
+  char newline = big_params.newline().c_str()[0];
 
   // save indices describing data
   data_start_ = big_params.data_start();
   data_end_ = big_params.data_end();
   label_ = big_params.label();
-  size_t data_cols = data_end_ - data_start_ + 1 + (has_label_ ? 1 : 0);
+  size_t data_cols = data_end_ - data_start_ + 1 + (this->output_labels_ ? 1 : 0);
 
   // first check if we have already a binary-csv
   switch (big_params.cache())
@@ -98,9 +96,9 @@ void BigDataLayer<Dtype>::DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
     // count number of delimiters in one line
     int count = 0;
     char* p = buff;
-    while(*(p++) != '\0') if(*p == delim_) ++count;
+    while(*(p++) != '\0') if(*p == delim) ++count;
     if(count < (data_cols-1)) {
-      LOG(ERROR) << "Found only " << count << " delimiters '" << delim_
+      LOG(ERROR) << "Found only " << count << " delimiters '" << delim
                  << "' in line " << buff << std::endl;
       throw std::ifstream::failure("Not enough data columns in source file?");
     }
@@ -135,21 +133,34 @@ void BigDataLayer<Dtype>::DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
   // the maximal batch size is computed from chunk_size (which is in MB)
   shape_[0] = ceil((1000000 / (sizeof(Dtype) * shape_[3] * shape_[2] * shape_[1])) *
                    big_params.chunk_size());
+  // big_params.set_batch_size(shape_[0]);
+  label_shape_ = vector<int>(1, shape_[0]);
+
   top[0]->Reshape(shape_);
-  this->prefetch_data_.Reshape(shape_);
+  for(int i=1; i < top.size(); ++i) {
+    top[i]->Reshape(label_shape_);
+  }
 
   // Read a data point, and use it to initialize the top blob.
   LOG(INFO) << "output data size: " << top[0]->num() << ","
       << top[0]->channels() << "," << top[0]->height() << ","
       << top[0]->width();
-
-  // every other blob will be of size BATCH, 1, 0, 0
-  label_shape_ = vector<int>(has_ids_ ? 1 : 0 + has_label_ ?, shape_[0]);
-  for(int i=1; i < top.size(); ++i) {
-    top[i]->Reshape(label_shape_);
+  // Before starting the prefetch thread, we make cpu_data and gpu_data
+  // calls so that the prefetch thread does not accidentally make simultaneous
+  // cudaMalloc calls when the main thread is running. In some GPUs this
+  // seems to cause failures if we do not so.
+  for (int i = 0; i < this->PREFETCH_COUNT; ++i) {
+    this->prefetch_[i].data_.mutable_cpu_data();
+    this->prefetch_[i].data_.Reshape(shape_);
+    if (this->output_labels_) {
+      this->prefetch_[i].label_.mutable_cpu_data();
+      this->prefetch_[i].label_.Reshape(label_shape_);
+    }
+    if (this->output_meta_) {
+      this->prefetch_[i].meta_.mutable_cpu_data();
+      this->prefetch_[i].meta_.Reshape(label_shape_);
+    }
   }
-  this->prefetch_label_.Reshape(label_shape_);
-  if(has_ids_) this->prefetch_ids_.Reshape(label_shape_);
 
   init_timer.Stop();
   DLOG(INFO) << "Init BigDataLayer time: " << init_timer.MilliSeconds() << " ms.";
@@ -159,38 +170,42 @@ void BigDataLayer<Dtype>::DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
 template <typename Dtype>
 void BigDataLayer<Dtype>::load_batch(Batch<Dtype> *batch)
 {
+  CPUTimer batch_timer;
+  batch_timer.Start();
+
+  CHECK(batch->data_.count());
+
   // revert prefetched data and labels back to it's full size
   batch->data_.Reshape(shape_);
-  if(has_label_) batch->label_.Reshape(label_shape_);
+  if(this->output_labels_) batch->label_.Reshape(label_shape_);
 
   Dtype* top_data = batch->data_.mutable_cpu_data();
   Dtype* top_label = NULL;
   Dtype* top_ids = NULL;
 
-  if(has_label_) {
-    top_label = this->prefetch_label_.mutable_cpu_data();
-    if(has_ids_) top_ids = this->prefetch_ids_.mutable_cpu_data();
-  } else if (has_ids_) {
-    top_ids = this->prefetch_label_.mutable_cpu_data();
+  if(this->output_labels_) {
+    top_label = batch->label_.mutable_cpu_data();
+    if(output_meta_) top_ids = batch->meta_.mutable_cpu_data();
+  } else if (output_meta_) {
+    top_ids = batch->label_.mutable_cpu_data();
   }
   if(has_binary_)
-    ReadFromBin(shape_[0], top_data, top_label);
+    ReadFromBin(shape_[0], top_data, top_label, top_ids);
   else
-    ReadFromText(shape_[0], top_data, top_label);
+    ReadFromText(shape_[0], top_data, top_label, top_ids);
 
   batch_timer.Stop();
   DLOG(INFO) << "Prefetch batch: " << batch_timer.MilliSeconds() << " ms.";
-  batch->data_
 }
 
 
 template <typename Dtype>
-void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* meta)
+void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* labels, Dtype* meta)
 {
   const BigDataParameter& big_params = this->layer_param_.big_data_param();
   // save metainfo about textual parameters
-  delim = big_params.separator().c_str()[0];
-  newline = big_params.newline().c_str()[0];
+  char delim = big_params.separator().c_str()[0];
+  char newline = big_params.newline().c_str()[0];
 
   char buff[255];
   size_t data_total = (shape_[1] * shape_[2] * shape_[3]);
@@ -203,9 +218,9 @@ void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* meta
     current_col = 0;
     got_label = false;
     // read a row from text file
-    while( textstream_->good() && (has_label_ != got_label || data_col < data_total) )
+    while( textstream_->good() && (this->output_labels_ != got_label || data_col < data_total) )
     {
-      textstream_->getline(buff, 255, delim_);
+      textstream_->getline(buff, 255, delim);
       if(current_col >= data_start_ && current_col <= data_end_) {
         data[data_col] = atof(buff);
         ++data_col;
@@ -223,20 +238,20 @@ void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* meta
     if (data_col == data_total) {
       // save the row to the binary file
       if(cache_) {
-        if(has_label_) binstream_->write((char*)labels, sizeof(*labels));
+        if(this->output_labels_) binstream_->write((char*)labels, sizeof(*labels));
         binstream_->write((char*) data, data_total * sizeof(*data));
       }
       // move the pointers
       data += data_total;
-      if(has_label_) labels += 1;
-      if(ids != NULL) ids[batch] = cur_id_;
+      if(this->output_labels_) labels += 1;
+      if(meta != NULL) meta[batch] = index_;
       ++batch;
-      ++cur_id_;
+      ++index_;
       // LOG(INFO) << " CSV " << batch << "/" << how_many << std::setw(3)
       //           << "\tD: " << data[-data_total] << ", " << data[-data_total+1]
       //                     << "..." << data[-2] << ", " << data[-1]
       //           << "\tL: " << labels[-1] // TODO: dangerous, remove
-      //           << "\tI: " << ids[batch];
+      //           << "\tI: " << meta[batch];
     }
 
     // if we reached EOF || there was an empty line at the end of the file
@@ -245,7 +260,7 @@ void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* meta
       textstream_->close();
       delete textstream_;
       textstream_ = NULL;
-      cur_id_ = 0;
+      index_ = 0;
       if(cache_)
       {
         binstream_->close();
@@ -259,7 +274,7 @@ void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* meta
           std::ios::in | std::ios::binary);
         has_binary_ = true;
         // means there was an empty line at the end of the file, so restart loading
-        return ReadFromBin(how_many - batch, data, labels, ids);
+        return ReadFromBin(how_many - batch, data, labels, meta);
       }
       else
       {
@@ -276,16 +291,16 @@ void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* meta
 
 
 template <typename Dtype>
-void BigDataLayer<Dtype>::ReadFromBin(size_t how_many, Dtype* data, Dtype* labels, Dtype *ids)
+void BigDataLayer<Dtype>::ReadFromBin(size_t how_many, Dtype* data, Dtype* labels, Dtype *meta)
 {
   // LOG(INFO) << " BIN,  STARTS on pos: " << binstream_->tellg();
   size_t data_total = (shape_[1] * shape_[2] * shape_[3]);
 
   for(int batch=0; batch < how_many; ++batch)
   {
-    if(ids != NULL) ids[batch] = cur_id_;
-    ++cur_id_;
-    if(has_label_) {
+    if(meta != NULL) meta[batch] = index_;
+    ++index_;
+    if(this->output_labels_) {
       binstream_->read((char*)labels, sizeof(*labels));
       labels += 1;
     }
@@ -299,7 +314,7 @@ void BigDataLayer<Dtype>::ReadFromBin(size_t how_many, Dtype* data, Dtype* label
       delete binstream_;
       binstream_ = new std::fstream(string(this->layer_param_.big_data_param().source() + "bin").c_str(),
         std::ios::in | std::ios::binary);
-      cur_id_ = 0;
+      index_ = 0;
       // skip random number of lines between 0 and BigDataParams.rand_skip
       binstream_->seekg((data_total * sizeof(*data) + sizeof(*labels)) *
                         int(rand()/RAND_MAX * this->layer_param_.big_data_param().rand_skip()));
@@ -311,32 +326,29 @@ void BigDataLayer<Dtype>::ReadFromBin(size_t how_many, Dtype* data, Dtype* label
 }
 
 
-// template <typename Dtype>
-// void BigDataLayer<Dtype>::Forward_cpu(
-//     const vector<Blob<Dtype>*>& bottom, const vector<Blob<Dtype>*>& top) {
-//   // First, join the thread
-//   this->JoinPrefetchThread();
-//   DLOG(INFO) << "Thread joined";
-//   // Reshape to loaded data.
-//   top[0]->Reshape(this->prefetch_data_.num(), this->prefetch_data_.channels(),
-//       this->prefetch_data_.height(), this->prefetch_data_.width());
-//   // Copy the data
-//   caffe_copy(this->prefetch_data_.count(), this->prefetch_data_.cpu_data(),
-//              top[0]->mutable_cpu_data());
-//   DLOG(INFO) << "Prefetch copied";
-//   // if there are more "tops" fill them from appropriate sources
-//   if (top.size() > 1) {
-//     caffe_copy(this->prefetch_label_.count(), this->prefetch_label_.cpu_data(),
-//                top[1]->mutable_cpu_data());
-//   }
-//   if(top.size() > 2) {
-//     caffe_copy(this->prefetch_ids_.count(), this->prefetch_ids_.cpu_data(),
-//                top[2]->mutable_cpu_data());
-//   }
-//   // Start a new prefetch thread
-//   DLOG(INFO) << "CreatePrefetchThread";
-//   this->CreatePrefetchThread();
-// }
+template <typename Dtype>
+void BigDataLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
+                                      const vector<Blob<Dtype>*>& top)
+{
+  Batch<Dtype>* batch = this->prefetch_full_.pop("Data layer prefetch queue empty");
+  // Reshape to loaded data.
+  top[0]->ReshapeLike(batch->data_);
+  // Copy the data
+  caffe_copy(batch->data_.count(), batch->data_.cpu_data(),
+             top[0]->mutable_cpu_data());
+  DLOG(INFO) << "Prefetch copied";
+  if (top.size() > 1) {
+    top[1]->ReshapeLike(batch->label_);
+    caffe_copy(batch->label_.count(), batch->label_.cpu_data(),
+               top[1]->mutable_cpu_data());
+  }
+  if(top.size() > 2) {
+    top[2]->ReshapeLike(batch->label_);
+    caffe_copy(batch->meta_.count(), batch->meta_.cpu_data(),
+               top[2]->mutable_cpu_data());
+  }
+  this->prefetch_free_.push(batch);
+}
 
 INSTANTIATE_CLASS(BigDataLayer);
 REGISTER_LAYER_CLASS(BigData);
