@@ -34,7 +34,6 @@ class BigDataLayerTest : public MultiDeviceTest<TypeParam> {
     blob_top_vec_.push_back(blob_top_data_);
     blob_top_vec_.push_back(blob_top_label_);
     blob_top_vec_.push_back(blob_top_ids_);
-    std::cout << "calling BigDataLayer::SetUp" << std::endl;
   }
 
 
@@ -49,8 +48,6 @@ class BigDataLayerTest : public MultiDeviceTest<TypeParam> {
     Dtype labelsSample[] = {1,2};
 
     // end of manually updated part
-    std::cout << "Calling BigDataLayer::TestRead" << std::endl;
-
     const size_t Dsize = sizeof(Dtype);
     const size_t MB = 1000000;
     const float  chunk_size = 0.005;
@@ -81,17 +78,21 @@ class BigDataLayerTest : public MultiDeviceTest<TypeParam> {
     // read once to test if the basic functionality works
     layer.Forward(blob_bottom_vec_, blob_top_vec_);
     for (int iter = 0; iter < (rows * 5); ++iter) {
+      #ifdef DEBUG
       std::cout << "ids {r:"   << blob_top_ids_->cpu_data()[iter]   << " ,e: " << iter % rows << "} "
                 << "label {r:" << blob_top_label_->cpu_data()[iter] << " ,e: " << labelsSample[iter % rows] << "} "
                 << "data {r:"  << blob_top_data_->cpu_data()[iter*cols] << ", "
                                << blob_top_data_->cpu_data()[iter*cols+1] << ", "
                                << blob_top_data_->cpu_data()[iter*cols+2] << ", "
-                               << blob_top_data_->cpu_data()[iter*cols+3] << "; "
+                               << blob_top_data_->cpu_data()[iter*cols+3] << ", "
+                               << blob_top_data_->cpu_data()[iter*cols+4] << "; "
                 << "e: " << dataSample[(iter%rows)*cols] << ", "
                            << dataSample[(iter%rows)*cols+1] << ", "
                            << dataSample[(iter%rows)*cols+2] << ", "
-                           << dataSample[(iter%rows)*cols+3] << "}"
+                           << dataSample[(iter%rows)*cols+3] << ", "
+                           << dataSample[(iter%rows)*cols+4] << "}"
                 << std::endl;
+      #endif
       // test iterations (iter) in order to see the cycling in reading a source file
       EXPECT_EQ(iter % rows, blob_top_ids_->cpu_data()[iter]);
       EXPECT_EQ(labelsSample[iter % rows], blob_top_label_->cpu_data()[iter]);
@@ -103,15 +104,14 @@ class BigDataLayerTest : public MultiDeviceTest<TypeParam> {
     layer.Forward(blob_bottom_vec_, blob_top_vec_);
     // we don't know which ID will appear first - but it must match its data
     int id = blob_top_ids_->cpu_data()[0];
-    EXPECT_EQ(labelsSample[id], blob_top_label_->cpu_data()[id]);
+    EXPECT_EQ(labelsSample[id], blob_top_label_->cpu_data()[0]);
     for (int j = 0; j < cols; ++j) {
-      EXPECT_EQ(dataSample[id*cols+j], blob_top_data_->cpu_data()[id+j]);
+      EXPECT_EQ(dataSample[id*cols+j], blob_top_data_->cpu_data()[j]);
     }
   }
 
   void TestCache()
   {
-    std::cout << "Calling BigDataLayer::TestCache" << std::endl;
     LayerParameter param;
     param.set_phase(TRAIN);
     ::caffe::BigDataParameter* data_param = param.mutable_big_data_param();
@@ -132,7 +132,6 @@ class BigDataLayerTest : public MultiDeviceTest<TypeParam> {
   }
 
   virtual ~BigDataLayerTest() {
-    std::cout << "Calling BigDataLayer::destructor" << std::endl;
     delete blob_top_data_;
     delete blob_top_label_;
     delete blob_top_ids_;
@@ -152,7 +151,7 @@ TYPED_TEST(BigDataLayerTest, TestRead) {
   this->TestRead();
 }
 
-// TYPED_TEST(BigDataLayerTest, TestRead) {
+// TYPED_TEST(BigDataLayerTest, TestCache) {
 //   this->TestCache();
 // }
 
