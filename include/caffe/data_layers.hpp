@@ -116,12 +116,11 @@ template <typename Dtype>
 class BigDataLayer : public BasePrefetchingDataLayer<Dtype> {
  public:
   explicit BigDataLayer(const LayerParameter& param)
-    : BasePrefetchingDataLayer<Dtype>(param) {}
+    : BasePrefetchingDataLayer<Dtype>(param), textstream_(NULL), binstream_(NULL) {}
   virtual ~BigDataLayer();
   virtual void DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
       const vector<Blob<Dtype>*>& top);
   // DataLayer uses DataReader instead for sharing for parallelism
-  virtual inline bool ShareInParallel() const { return false; }
   virtual inline const char* type() const { return "BigData"; }
   virtual inline int ExactNumBottomBlobs() const { return 0; }
   virtual inline int MinTopBlobs() const { return 1; }
@@ -129,8 +128,6 @@ class BigDataLayer : public BasePrefetchingDataLayer<Dtype> {
 
   virtual void Forward_cpu(const vector<Blob<Dtype>*>& bottom,
       const vector<Blob<Dtype>*>& top);
-
-  static const int PREFETCH_COUNT = 1;
 
  protected:
   virtual void load_batch(Batch<Dtype>* batch);

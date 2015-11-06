@@ -28,13 +28,17 @@ namespace caffe {
 
 template <typename Dtype>
 BigDataLayer<Dtype>::~BigDataLayer<Dtype>() {
+  this->StopInternalThread();
+
   if (textstream_ != NULL) {
     if(textstream_->is_open()) textstream_->close();
     delete textstream_;
+    textstream_ = NULL;
   }
   if (binstream_ != NULL) {
     if(binstream_->is_open()) binstream_->close();
     delete binstream_;
+    binstream_ = NULL;
   }
 }
 
@@ -104,6 +108,7 @@ void BigDataLayer<Dtype>::DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
     }
     delete[] buff;
     p = NULL;
+    textstream_->seekg(0);
 
     // skip # of lines denoted to header
     for(int i=0; i < big_params.header() + int(rand() / RAND_MAX * big_params.rand_skip()); ++i) {
@@ -150,15 +155,15 @@ void BigDataLayer<Dtype>::DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
   // cudaMalloc calls when the main thread is running. In some GPUs this
   // seems to cause failures if we do not so.
   for (int i = 0; i < this->PREFETCH_COUNT; ++i) {
-    this->prefetch_[i].data_.mutable_cpu_data();
     this->prefetch_[i].data_.Reshape(shape_);
+    this->prefetch_[i].data_.mutable_cpu_data();
     if (this->output_labels_) {
-      this->prefetch_[i].label_.mutable_cpu_data();
       this->prefetch_[i].label_.Reshape(label_shape_);
+      this->prefetch_[i].label_.mutable_cpu_data();
     }
     if (this->output_meta_) {
-      this->prefetch_[i].meta_.mutable_cpu_data();
       this->prefetch_[i].meta_.Reshape(label_shape_);
+      this->prefetch_[i].meta_.mutable_cpu_data();
     }
   }
 
@@ -185,10 +190,14 @@ void BigDataLayer<Dtype>::load_batch(Batch<Dtype> *batch)
 
   if(this->output_labels_) {
     top_label = batch->label_.mutable_cpu_data();
-    if(output_meta_) top_ids = batch->meta_.mutable_cpu_data();
+    if(output_meta_) {
+      top_ids = batch->meta_.mutable_cpu_data();
+    }
   } else if (output_meta_) {
+    // if we output solely IDs, use label_ Blob in Batch for it
     top_ids = batch->label_.mutable_cpu_data();
   }
+
   if(has_binary_)
     ReadFromBin(shape_[0], top_data, top_label, top_ids);
   else
@@ -336,7 +345,6 @@ void BigDataLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
   // Copy the data
   caffe_copy(batch->data_.count(), batch->data_.cpu_data(),
              top[0]->mutable_cpu_data());
-  DLOG(INFO) << "Prefetch copied";
   if (top.size() > 1) {
     top[1]->ReshapeLike(batch->label_);
     caffe_copy(batch->label_.count(), batch->label_.cpu_data(),
