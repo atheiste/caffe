@@ -138,7 +138,7 @@ class BigDataLayer : public BasePrefetchingDataLayer<Dtype> {
   std::fstream *textstream_, *binstream_;
 
   size_t data_start_, data_end_, label_;  // indices denoting data resp. label
-  size_t index_;  // keeps track of the current index of row being read from source
+  float index_;  // keeps track of the current index of row being read from source
   bool output_meta_; // if we output indices of rows as well
   bool has_binary_, cache_; // has_binary_ if we already created a binary file, cache if caching is allowed
 };

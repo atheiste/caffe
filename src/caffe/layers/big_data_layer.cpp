@@ -95,15 +95,18 @@ void BigDataLayer<Dtype>::DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
     // find out if the data will fit in one batch (so we can cache them)
     // meanwhile check if we have enough delimiters to claimed data columns
     char *buff = new char[21*data_cols + 1];
-    textstream_->getline(buff, 21*data_cols);
+    textstream_->getline(buff, 21*data_cols, newline);
 
     // count number of delimiters in one line
     int count = 0;
     char* p = buff;
     while(*(p++) != '\0') if(*p == delim) ++count;
     if(count < (data_cols-1)) {
-      LOG(ERROR) << "Found only " << count << " delimiters '" << delim
-                 << "' in line " << buff << std::endl;
+      LOG(ERROR) << "Only " << count << " separators '" << delim
+                 << "' in line \"" << string(buff, 40) << "\"..." << std::endl;
+      textstream_->close();
+      delete textstream_;
+      delete[] buff;
       throw std::ifstream::failure("Not enough data columns in source file?");
     }
     delete[] buff;
@@ -157,7 +160,7 @@ void BigDataLayer<Dtype>::DataLayerSetUp(const vector<Blob<Dtype>*>& bottom,
   for (int i = 0; i < this->PREFETCH_COUNT; ++i) {
     this->prefetch_[i].data_.Reshape(shape_);
     this->prefetch_[i].data_.mutable_cpu_data();
-    if (this->output_labels_) {
+    if (this->output_labels_ ) {
       this->prefetch_[i].label_.Reshape(label_shape_);
       this->prefetch_[i].label_.mutable_cpu_data();
     }
@@ -183,25 +186,19 @@ void BigDataLayer<Dtype>::load_batch(Batch<Dtype> *batch)
   // revert prefetched data and labels back to it's full size
   batch->data_.Reshape(shape_);
   if(this->output_labels_) batch->label_.Reshape(label_shape_);
+  if(this->output_meta_) batch->meta_.Reshape(label_shape_);
 
   Dtype* top_data = batch->data_.mutable_cpu_data();
   Dtype* top_label = NULL;
-  Dtype* top_ids = NULL;
+  Dtype* top_meta = NULL;
 
-  if(this->output_labels_) {
-    top_label = batch->label_.mutable_cpu_data();
-    if(output_meta_) {
-      top_ids = batch->meta_.mutable_cpu_data();
-    }
-  } else if (output_meta_) {
-    // if we output solely IDs, use label_ Blob in Batch for it
-    top_ids = batch->label_.mutable_cpu_data();
-  }
+  if (this->output_labels_) top_label = batch->label_.mutable_cpu_data();
+  if (this->output_meta_) top_meta = batch->meta_.mutable_cpu_data();
 
   if(has_binary_)
-    ReadFromBin(shape_[0], top_data, top_label, top_ids);
+    ReadFromBin(shape_[0], top_data, top_label, top_meta);
   else
-    ReadFromText(shape_[0], top_data, top_label, top_ids);
+    ReadFromText(shape_[0], top_data, top_label, top_meta);
 
   batch_timer.Stop();
   DLOG(INFO) << "Prefetch batch: " << batch_timer.MilliSeconds() << " ms.";
@@ -221,6 +218,7 @@ void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* labe
   size_t batch = 0, current_col = 0, data_col = 0;
   bool got_label = false;
 
+  // main loop - read `how_many` records
   while(batch < how_many)
   {
     data_col = 0;
@@ -234,16 +232,13 @@ void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* labe
         data[data_col] = atof(buff);
         ++data_col;
       }
-
-      if(current_col == label_) {
+      else if(this->output_labels_ && current_col == label_) {
         *labels = atof(buff);
         got_label = true;
       }
-
       ++current_col;
     }
     textstream_->ignore(2147483647, newline);
-
     if (data_col == data_total) {
       // save the row to the binary file
       if(cache_) {
@@ -253,14 +248,12 @@ void BigDataLayer<Dtype>::ReadFromText(size_t how_many, Dtype* data, Dtype* labe
       // move the pointers
       data += data_total;
       if(this->output_labels_) labels += 1;
-      if(meta != NULL) meta[batch] = index_;
+      if(this->output_meta_) {
+        *meta = index_;
+        meta += 1;
+      }
       ++batch;
       ++index_;
-      // LOG(INFO) << " CSV " << batch << "/" << how_many << std::setw(3)
-      //           << "\tD: " << data[-data_total] << ", " << data[-data_total+1]
-      //                     << "..." << data[-2] << ", " << data[-1]
-      //           << "\tL: " << labels[-1] // TODO: dangerous, remove
-      //           << "\tI: " << meta[batch];
     }
 
     // if we reached EOF || there was an empty line at the end of the file
@@ -307,8 +300,10 @@ void BigDataLayer<Dtype>::ReadFromBin(size_t how_many, Dtype* data, Dtype* label
 
   for(int batch=0; batch < how_many; ++batch)
   {
-    if(meta != NULL) meta[batch] = index_;
-    ++index_;
+    if(this->output_meta_) {
+      *meta = index_++;
+      meta += 1;
+    }
     if(this->output_labels_) {
       binstream_->read((char*)labels, sizeof(*labels));
       labels += 1;
@@ -328,9 +323,6 @@ void BigDataLayer<Dtype>::ReadFromBin(size_t how_many, Dtype* data, Dtype* label
       binstream_->seekg((data_total * sizeof(*data) + sizeof(*labels)) *
                         int(rand()/RAND_MAX * this->layer_param_.big_data_param().rand_skip()));
     }
-    // LOG(INFO) << " BIN " << batch << "/" << how_many
-    // << " D: " << data[-data_total] << "..." << data[-1]
-    // << " L: " << labels[-1]; // TODO: dangerous, remove
   }
 }
 
@@ -345,15 +337,21 @@ void BigDataLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
   // Copy the data
   caffe_copy(batch->data_.count(), batch->data_.cpu_data(),
              top[0]->mutable_cpu_data());
-  if (top.size() > 1) {
+  if (this->output_labels_) {
     top[1]->ReshapeLike(batch->label_);
     caffe_copy(batch->label_.count(), batch->label_.cpu_data(),
                top[1]->mutable_cpu_data());
-  }
-  if(top.size() > 2) {
-    top[2]->ReshapeLike(batch->label_);
-    caffe_copy(batch->meta_.count(), batch->meta_.cpu_data(),
-               top[2]->mutable_cpu_data());
+    if(this->output_meta_) {
+      top[2]->ReshapeLike(batch->meta_);
+      caffe_copy(batch->meta_.count(), batch->meta_.cpu_data(),
+                 top[2]->mutable_cpu_data());
+    }
+  } else if (this->output_meta_) {
+    if(this->output_meta_) {
+      top[1]->ReshapeLike(batch->meta_);
+      caffe_copy(batch->meta_.count(), batch->meta_.cpu_data(),
+                 top[1]->mutable_cpu_data());
+    }
   }
   this->prefetch_free_.push(batch);
 }
